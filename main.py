@@ -4,32 +4,46 @@ import json
 import pandas as pd
 import inspect
 import uuid
-from typing import Any, Literal, List, Dict
+from typing import Any, Literal, List, Dict, Optional, Union, Annotated
+
+# DrissionPage and MCP imports
 from DrissionPage import Chromium, ChromiumOptions
 from DrissionPage.items import ChromiumElement, ChromiumTab
 from DrissionPage.common import Keys
 from mcp.server.fastmcp import FastMCP
-from CodeBox import domTreeToJson
+from pydantic import Field
 
+# Placeholder for your custom JS module
+from CodeBox import domTreeToJson
+# Other imports
 from PIL import Image as PILImage
 import base64
 import io
+import time
+
 prompt = '''
-你正在使用一组浏览器控制工具来执行网页自动化任务。请按照以下步骤依次使用这些工具,一直尝试直到完成任务：
-启动或连接已有的浏览器实例。该步骤是所有后续操作的前提。
-打开新的标签页或导航到目标网址。
-获取当前页面的 DOM 树结构（JSON 格式）。这一步是为了分析页面结构，识别目标元素的定位信息，比如通过 text, css 等方式。
-根据 DOM 分析得到的线索（如文本内容、CSS 选择器等），查找页面中的单个元素，并缓存其引用。
-对查找到的元素执行具体操作，如点击、输入、发送按键或获取属性。
+你正在使用一组浏览器控制工具来执行网页自动化任务。请按照以下步骤依次使用这些工具,完全自主完成任务：
+1.  **启动浏览器**: 使用 `connect_or_open_browser` 启动或连接已有的浏览器实例。这是所有操作的前提。
+2.  **导航**: 使用 `new_tab` 打开新的标签页或导航到目标网址。
+3.  **分析页面**: 获取当前页面的信息，用于分析页面结构，识别目标元素的定位信息。
+4.  **定位元素**: 根据 DOM 分析得到的线索（如文本内容、CSS 选择器等），使用 `find_element` 或 `find_elements` 查找页面中的元素，并缓存其引用。
+5.  **执行操作**: 对查找到的元素执行具体操作，如 `click`、`input_text`、`get_attribute` 等。
+6.  **数据抓取 (可选)**: 如果需要抓取接口数据, 依次使用 `start_network_listening`, `get_network_traffic_summary`, `get_response_body`, 和 `process_json_with_pandas_and_save`。
 '''
 
 class DrissionPageMCP:
+    """
+    一个基于 DrissionPage 的 MCP 工具集，用于控制浏览器执行自动化任务。
+    """
     def __init__(self):
-        """初始化 DrissionPageMCP 实例，建立一个元素缓存。"""
-        self.browser: Chromium | None = None
+        """title: 初始化工具集
+        description: 初始化 DrissionPageMCP 实例，建立一个浏览器和元素缓存。
+        """
+        self.browser: Optional[Chromium] = None
         self.element_cache: Dict[str, ChromiumElement] = {}
+        self.network_events: List[Dict] = []
 
-    def _get_tab(self, tab_id: str) -> ChromiumTab | None:
+    def _get_tab(self, tab_id: str) -> Optional[ChromiumTab]:
         """内部辅助函数，根据 tab_id 获取标签页对象，支持 'current' 别名。"""
         if not self.browser:
             print("[!] 浏览器未初始化")
@@ -38,88 +52,111 @@ class DrissionPageMCP:
             return self.browser.latest_tab
         return self.browser.get_tab(tab_id)
 
-    def get_domTreeToJson(self, tab_id: str) -> dict:
-        """
-        获取给定tab的json页面信息
+    def get_domTreeToJson(
+        self, 
+        tab_id: Annotated[str, Field(description="目标标签页的ID，可传入 'current' 代表当前活动标签页。")] = "current"
+    ) -> dict:
+        """title: 获取页面的 DOM 结构
+        description: 获取指定标签页的完整 DOM 结构，并以 JSON 格式返回。这对于分析页面布局和定位元素至关重要。
         """
         tab = self._get_tab(tab_id)
-        if not tab: return {"error": f"Tab {tab_id} not found."}
+        if not tab:
+            return {"error": f"Tab '{tab_id}' not found."}
         
-        page_tree = tab._run_js(domTreeToJson)
-        
+        page_tree = tab.run_js(domTreeToJson)
         return page_tree
 
-    async def connect_or_open_browser(self, config: dict = {'debug_port': 9222}) -> dict:
-        """
-        打开一个新浏览器或接管一个已存在的浏览器。
-        这是所有操作的入口点。
-        Returns:
-            dict: 包含浏览器信息和初始标签页的 `tab_id`。
+    async def connect_or_open_browser(
+        self, 
+        config: Annotated[dict, Field(description="(可选)浏览器配置字典，可以包含 'debug_port', 'browser_path', 'headless' 等。")] = {'debug_port': 9222}
+    ) -> dict:
+        """title: 启动或连接浏览器
+        description: 打开一个新浏览器或接管一个已存在的浏览器。这是所有浏览器操作的入口点。
         """
         co = ChromiumOptions()
-        if debug_port := config.get("debug_port"): co.set_local_port(debug_port)
-        if browser_path := config.get("browser_path"): co.set_browser_path(browser_path)
-        if config.get("headless", False): co.headless(True)
+        if debug_port := config.get("debug_port"):
+            co.set_local_port(debug_port)
+        if browser_path := config.get("browser_path"):
+            co.set_browser_path(browser_path)
+        if config.get("headless", False):
+            co.headless(True)
         self.browser = Chromium(co)
         tab = self.browser.latest_tab or self.browser.new_tab()
         return {"tab_id": tab.tab_id, "title": tab.title, "url": tab.url}
 
-    def list_tabs(self) -> List[Dict]:
-            """
-            获取所有已打开标签页的列表，并标明当前活动标签页。
-            当需要操作非当前活动标签页时，可以用此函数找到目标 `tab_id`。
-            Returns:
-                List[Dict]: 每个标签页的信息列表，包含 'index', 'tab_id', 'title', 'url', 'is_active'。
-            """
-            if not self.browser:
-                return []
+    async def get(
+        self, 
+        url: Annotated[str, Field(description="url网址")],
+        tab_id: Annotated[str,Field(description="tab id(可选),默认为当前tab")] = 'current'
+    ) -> dict:
+        """title: 导航到新网址
+        description: 在指定的标签页中导航到一个新的网址。这是在现有标签页上改变页面的核心方法。
+        """
+        # (这里不再需要从 params 解析，直接使用 url 和 tab_id)
+        if not url:
+            return {"error": "参数错误：必须提供 'url'。"}
+
+        tab = self._get_tab(tab_id)
+        if not tab:
+            return {"error": f"标签页 '{tab_id}' 未找到。"}
+        
+        try:
+            # DrissionPage 的 get 方法是同步的，但在异步函数中可以 await
+            tab.get(url)
             
-            tab_list = []
-            # [改动] 使用 .get_tabs() 方法，这是 DrissionPage 的正确用法
-            all_tabs = self.browser.get_tabs()
-            # 获取当前活动的标签页，用于后续判断
-            active_tab = self.browser.latest_tab
+            return {
+                "status": "success",
+                "tab_id": tab.tab_id,
+                "title": tab.title,
+                "url": tab.url
+            }
+        except Exception as e:
+            return {"error": f"导航到 {url} 失败: {e}"}
 
-            # [改动] 使用 for 循环和 enumerate 来方便地添加索引和判断活动状态
-            for i, tab in enumerate(all_tabs):
-                try:
-                    tab_info = {
-                        "index": i + 1,  # 增加一个 1-based 的索引，方便人类和 AI 沟通
-                        "tab_id": tab.tab_id,
-                        "title": tab.title,
-                        "url": tab.url,
-                        "is_active": tab == active_tab  # 增加一个布尔值，标明是否为当前活动标签
-                    }
-                    tab_list.append(tab_info)
-                except Exception as e:
-                    # 增加一个try-except，防止某个tab因为意外关闭等原因导致读取信息失败，从而中断整个函数
-                    print(f"[!] Warning: Failed to get info for a tab, skipping. Error: {e}")
-                
-            return tab_list
-
-    async def new_tab(self, url: str) -> dict:
+    def list_tabs(self) -> List[Dict[str, Any]]:
+        """title: 列出所有标签页
+        description: 获取所有已打开标签页的列表，并标明哪个是当前活动标签页。
         """
-        打开一个新的浏览器标签页并导航到指定网址。
-        Args:
-            url (str): 要在新标签页中打开的网址。
+        if not self.browser:
+            return []
+        
+        tab_list = []
+        all_tabs = self.browser.get_tabs() # 使用 get_tabs() 方法
+        active_tab = self.browser.latest_tab
 
-        Returns:
-            dict: 新标签页的信息，包含 'tab_id', 'title', 'url'。
+        for i, tab in enumerate(all_tabs):
+            try:
+                tab_info = {
+                    "index": i + 1,
+                    "tab_id": tab.tab_id,
+                    "title": tab.title,
+                    "url": tab.url,
+                    "is_active": tab == active_tab,
+                }
+                tab_list.append(tab_info)
+            except Exception as e:
+                print(f"[!] Warning: Failed to get info for a tab, skipping. Error: {e}")
+        return tab_list
+
+    async def new_tab(
+        self, 
+        url: Annotated[str, Field(description="要在新标签页中打开的网址。")]
+    ) -> dict:
+        """title: 新建标签页并导航
+        description: 打开一个新的浏览器标签页并导航到指定的URL。
         """
-        await self.connect_or_open_browser()
-        # if not self.browser: a = await self.connect_or_open_browser()
+        # await self.connect_or_open_browser()
+        # if not self.browser:
+        #     await self.connect_or_open_browser()
         tab = self.browser.new_tab(url)
-        return {"tab_id": tab.tab_id, "title": tab.title, "url": tab.url,'domTree_json':self.get_domTreeToJson(tab.tab_id)}
+        return {"tab_id": tab.tab_id, "title": tab.title, "url": tab.url}
 
-    def close_tab(self, tab_id: str) -> bool:
-        """
-        根据 tab_id 关闭指定的标签页。
-        任务完成后，建议关闭不再需要的标签页以释放资源。
-        Args:
-            tab_id (str): 目标标签页的ID。
-
-        Returns:
-            bool: 如果成功关闭则返回 True，否则返回 False。
+    def close_tab(
+        self, 
+        tab_id: Annotated[str, Field(description="要关闭的目标标签页的ID。")]
+    ) -> bool:
+        """title: 关闭标签页
+        description: 根据 tab_id 关闭指定的标签页。任务完成后，建议关闭不再需要的标签页以释放资源。
         """
         tab = self._get_tab(tab_id)
         if tab:
@@ -128,19 +165,17 @@ class DrissionPageMCP:
             return True
         return False
 
-    def send_key(self, tab_id: str, key: Literal["Enter", "Escape", "Backspace", "Tab", "PageUp", "PageDown", "End", "Home"]) -> dict:
-        """
-        向指定的标签页发送一个特殊的键盘按键。
-        可用于提交表单 (Enter)、关闭弹窗 (Escape) 等。
-        Args:
-            tab_id (str): 目标标签页的ID。
-            key (str): 要发送的特殊按键。
-
-        Returns:
-            dict: 操作结果。
+    def send_key(
+        self, 
+        tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")], 
+        key: Annotated[Literal["Enter", "Escape", "Backspace", "Tab", "PageUp", "PageDown", "End", "Home"], Field(description="要发送的特殊按键，例如 'Enter', 'Escape'。")]
+    ) -> dict:
+        """title: 发送特殊按键
+        description: 向指定的标签页发送一个特殊的键盘按键，可用于提交表单 (Enter)、关闭弹窗 (Escape) 等。
         """
         tab = self._get_tab(tab_id)
-        if not tab: return {"error": f"Tab {tab_id} not found."}
+        if not tab:
+            return {"error": f"Tab '{tab_id}' not found."}
         key_map = {
             "Enter": Keys.ENTER, "Escape": Keys.ESCAPE, "Backspace": Keys.BACKSPACE, 
             "Tab": Keys.TAB, "PageUp": Keys.PAGE_UP, "PageDown": Keys.PAGE_DOWN,
@@ -149,45 +184,45 @@ class DrissionPageMCP:
         tab.actions.type(key_map[key])
         return {"status": "success", "action": "send_key", "key": key}
 
-    def find_element(self, tab_id: str, by: Literal['css', 'text'], value: str) -> dict:
-        """
-        在指定标签页中查找单个元素，并返回其 element_id。
-        Args:
-            tab_id (str): 目标标签页的ID。
-            by (str): 定位策略，'css' 或 'text',其中text为模糊匹配
-            value (str): 定位策略对应的值。
-        Returns:
-            dict: 包含 `element_id` 的字典，或错误信息。
+    def find_element(
+        self, 
+        tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")], 
+        by: Annotated[Literal['css', 'text'], Field(description="定位策略, 'css' (CSS选择器) 或 'text' (模糊文本匹配)。")], 
+        value: Annotated[str, Field(description="定位策略对应的值。")]
+    ) -> dict:
+        """title: 查找单个元素
+        description: 在指定标签页中通过 CSS选择器 或 模糊文本匹配 查找单个元素，并将其ID存入缓存以便后续操作。
         """
         tab = self._get_tab(tab_id)
-        if not tab: return {"error": f"Tab with id {tab_id} not found."}
+        if not tab:
+            return {"error": f"Tab with id '{tab_id}' not found."}
         locator = f'text:{value}' if by == 'text' else f'css:{value}'
         element = tab.ele(locator, timeout=5)
         if element:
             element_id = f"elem-{uuid.uuid4()}"
             self.element_cache[element_id] = element
-            return {"element_id": element_id,'texts':element.texts(),'html':element.html}
-        else:
-            raise Exception(f"Element not found by {by} with value '{value}'")
+            return {"element_id": element_id, 'texts': element.texts(), 'html': element.html}
+        
+        raise Exception(f"Element not found by '{by}' with value '{value}'")
 
-    def find_elements(self, tab_id: str, by: Literal['css', 'text'], value: str) -> dict:
-        """
-        在指定标签页中查找多个元素，并返回它们的 element_id 列表和对应的文本。
-        Args:
-            tab_id (str): 目标标签页的ID。
-            by (str): 定位策略，'css' 或 'text'，其中 text 为模糊匹配。
-            value (str): 定位策略对应的值。
-        Returns:
-            dict: 包含多个元素的 `element_id` 和 `texts` 列表，或错误信息。
+    def find_elements(
+        self, 
+        tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")], 
+        by: Annotated[Literal['css', 'text'], Field(description="定位策略, 'css' (CSS选择器) 或 'text' (模糊文本匹配)。")], 
+        value: Annotated[str, Field(description="定位策略对应的值。")]
+    ) -> dict:
+        """title: 查找多个元素
+        description: 在指定标签页中查找所有匹配的元素，并返回它们的 element_id 列表和对应的文本。
         """
         tab = self._get_tab(tab_id)
         if not tab:
-            return {"error": f"Tab with id {tab_id} not found."}
+            return {"error": f"Tab with id '{tab_id}' not found."}
         
         locator = f'text:{value}' if by == 'text' else f'css:{value}'
         elements = tab.eles(locator, timeout=5)
         if not elements:
-            raise Exception(f"No elements found by {by} with value '{value}'")
+            raise Exception(f"No elements found by '{by}' with value '{value}'")
+        
         results = []
         for ele in elements:
             element_id = f"elem-{uuid.uuid4()}"
@@ -198,20 +233,13 @@ class DrissionPageMCP:
             })
         return {"elements": results}
 
-    def run_javascript(self, tab_id: str, js_script: str) -> dict:
-        """
-        【高阶工具】在指定的标签页中执行一段任意的 JavaScript 代码，并返回结果。
-        当标准工具无法满足特殊的信息提取或操作需求时，可使用此工具。
-        Args:
-            tab_id (str): 目标标签页的ID, 可传入 'current'。
-            js_script (str): 要执行的 JavaScript 代码字符串。脚本中必须有 `return` 语句才能获取返回值。
-
-        Returns:
-            dict: 包含执行结果的字典 `{'result': ...}` 或错误信息 `{'error': ...}`。
-        
-        用法示例:
-        - 获取页面标题: `js_script="return document.title;"`
-        - 获取特定元素的值: `js_script="return document.querySelector('#my-element').value;"`
+    def run_javascript(
+        self, 
+        tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")], 
+        js_script: Annotated[str, Field(description="要执行的 JavaScript 代码字符串。脚本中必须有 `return` 语句才能获取返回值。")]
+    ) -> dict:
+        """title: 执行JavaScript代码
+        description: 【高阶工具】在指定的标签页中执行一段任意的 JavaScript 代码，并返回结果。当标准工具无法满足特殊需求时使用。
         """
         tab = self._get_tab(tab_id)
         if not tab:
@@ -221,212 +249,220 @@ class DrissionPageMCP:
             result = tab.run_js(js_script)
             return {"result": result}
         except Exception as e:
-            # 返回详细的JS错误信息，方便LLM调试自己的代码
             return {"error": f"JavaScript execution failed: {e}"}
 
-
-
     def clear_element_cache(self) -> str:
-        """
-        清除所有已缓存的元素。
-        在页面发生重大变化（如跳转、刷新）或关闭后，建议调用此函数以防止引用到旧的、已失效的元素。
-        Returns:
-            str: 清理完成的消息。
+        """title: 清空元素缓存
+        description: 清除所有已缓存的元素引用。在页面跳转、刷新或关闭后，应调用此函数以避免操作过时元素。
         """
         count = len(self.element_cache)
         self.element_cache.clear()
         return f"Element cache cleared. {count} elements removed."
 
-    def read_element_cache(self) -> dict:
+    def read_element_cache(self) -> Dict[str, str]:
+        """title: 读取元素缓存
+        description: 查看所有当前已缓存的元素及其ID。
         """
-        该方法缓存中查看所有已经找到的元素。
-        Returns:
-            dict: 所有已经找到的元素
-        """
-        return self.element_cache
+        return {eid: str(ele) for eid, ele in self.element_cache.items()}
 
-    def click(self, element_id: str) -> dict:
-        """
-        需要先调用find_element获取元素ID,点击该元素
-        Args:
-            element_id (str): 目标元素的唯一ID, 需要去获取
-
-        Returns:
-            dict: 操作结果。
+    def click(
+        self, 
+        element_id: Annotated[str, Field(description="目标元素的唯一ID，通过 find_element 或 find_elements 获取。")]
+    ) -> dict:
+        """title: 点击元素
+        description: 点击一个已通过 find_element 获取到的元素。
         """
         element = self.element_cache.get(element_id)
-        if not element: return {"error": f"Element ID '{element_id}' not found in cache."}
+        if not element:
+            return {"error": f"Element ID '{element_id}' not found in cache."}
         element.click()
         return {"status": "success", "action": "click"}
 
-    def input_text(self, element_id: str, text: str, clear_first: bool = True) -> dict:
-        """
-        向一个由扫描或查找工具获取到的元素输入文本。
-
-        Args:
-            element_id (str): 目标元素的唯一ID。
-            text (str): 要输入的文本内容。
-            clear_first (bool): 输入前是否先清空输入框，默认为 True。
-
-        Returns:
-            dict: 操作结果。
+    def input_text(
+        self, 
+        element_id: Annotated[str, Field(description="目标元素的唯一ID，通过 find_element 或 find_elements 获取。")], 
+        text: Annotated[str, Field(description="要输入的文本内容。")], 
+        clear_first: Annotated[bool, Field(description="输入前是否先清空输入框，默认为 True。")] = True
+    ) -> dict:
+        """title: 输入文本
+        description: 向一个已获取的元素（通常是输入框）输入文本。
         """
         element = self.element_cache.get(element_id)
-        if not element: return {"error": f"Element ID '{element_id}' not found in cache."}
+        if not element:
+            return {"error": f"Element ID '{element_id}' not found in cache."}
         element.input(text, clear=clear_first)
         return {"status": "success", "action": "input_text"}
 
-    def get_attribute(self, element_id: str, attribute_name: str) -> dict:
-        """
-        获取一个由扫描或查找工具获取到的元素的指定HTML属性值。
-        例如 'href' (获取链接), 'value' (获取输入框当前的值), 'class' 等。
-
-        Args:
-            element_id (str): 目标元素的唯一ID。
-            attribute_name (str): 想要获取的属性名。
-
-        Returns:
-            dict: 包含属性值的字典。
+    def get_attribute(
+        self, 
+        element_id: Annotated[str, Field(description="目标元素的唯一ID，通过 find_element 或 find_elements 获取。")], 
+        attribute_name: Annotated[str, Field(description="想要获取的HTML属性名, 例如 'href', 'value', 'class' 等。")]
+    ) -> dict:
+        """title: 获取元素属性
+        description: 获取一个已获取元素的指定HTML属性值，如 'href', 'src', 'value', 'class' 等。
         """
         element = self.element_cache.get(element_id)
-        if not element: return {"error": f"Element ID '{element_id}' not found in cache."}
+        if not element:
+            return {"error": f"Element ID '{element_id}' not found in cache."}
         return {"attribute_value": element.attr(attribute_name)}
     
-    def get_screenshot_of_element(self, element_id: str) -> bytes:
-        """
-        获取单个元素的截图。比如播放按钮等
-        用于需要对特定区域进行视觉分析的场景。
-
-        Args:
-            element_id (str): 目标元素的唯一ID。
-
-        Returns:
-            bytes: 元素截图的二进制数据 (JPEG格式)。
+    def get_screenshot_of_element(
+        self, 
+        element_id: Annotated[str, Field(description="目标元素的唯一ID，通过 find_element 或 find_elements 获取。")]
+    ) -> Union[bytes, str]:
+        """title: 获取元素截图
+        description: 获取单个元素的截图，比如播放按钮、验证码等，用于需要对特定区域进行视觉分析的场景。
         """
         element = self.element_cache.get(element_id)
-        if not element: return b''
+        if not element:
+            return f"Error: Element ID '{element_id}' not found in cache."
         return element.get_screenshot(as_bytes='jpeg')
 
-    def wait(self, seconds: int) -> str:
+    def wait(
+        self, 
+        seconds: Annotated[Union[int, float], Field(description="需要等待的秒数。")]
+    ) -> str:
+        """title: 等待
+        description: 让程序暂停指定的秒数，用于等待页面加载或某些异步操作完成。
         """
-        让程序暂停指定的秒数。
-        用于等待页面加载或某些异步操作完成。
-
-        Args:
-            seconds (int): 需要等待的秒数。
-
-        Returns:
-            str: 表示等待完成的消息。
-        """
-        import time
         time.sleep(seconds)
         return f"Waited for {seconds} seconds."
     
-
-    # --- 新增：网络监听与数据处理工具 ---
+    # --- 网络监听与数据处理工具 ---
 
     def _network_event_handler(self, **kwargs):
         """内部函数：处理网络事件的回调"""
-        if not hasattr(self, 'network_events'):
-            self.network_events = []
-        
-        # 我们只关心收到响应的事件
         if kwargs.get('method') == 'Network.responseReceived':
             self.network_events.append(kwargs)
 
-    def start_network_listening(self, tab_id: str = "current") -> dict:
-        """
-        【数据分析第1步】开启对指定标签页的网络监听。
-        在需要捕获API请求等场景下，首先调用此工具。
-        """
-        tab = self._get_tab(tab_id)
-        if not tab: return {"error": f"Tab '{tab_id}' not found."}
-        
-        self.network_events = [] # 清空旧数据
-        tab.driver.set_callback('Network.responseReceived', self._network_event_handler)
-        tab.run_cdp('Network.enable')
-        return {"status": "Network listening has been enabled."}
-        
-    def get_network_traffic_summary(self, tab_id: str = "current") -> dict:
-        """
-        【数据分析第2步】获取已捕获网络请求的摘要列表。
-        此工具不返回具体数据内容，只返回请求的URL、类型等元信息，用于判断哪个请求可能包含有价值的数据。
-        """
-        if not hasattr(self, 'network_events') or not self.network_events:
-            return {"error": "No network traffic captured. Did you run 'start_network_listening' first?"}
-            
-        summary = []
-        for event in self.network_events:
-            params = event.get('params', {})
-            response = params.get('response', {})
-            summary.append({
-                "request_id": params.get('requestId'),
-                "url": response.get('url'),
-                "method": response.get('request', {}).get('method', 'GET'), # 修正：从response中获取method
-                "status": response.get('status'),
-                "mime_type": response.get('mimeType')
-            })
-        return {"traffic_summary": summary}
-        
-    def get_response_body(self, tab_id: str, request_id: str) -> dict:
-        """
-        【数据分析第3步】根据 request_id 获取单个网络响应的具体内容（body）。
-        当从摘要中发现可疑的JSON请求后，用此工具提取其数据。
+    def start_network_listening(
+        self, 
+        tab_id: Annotated[str, Field(description="要开启监听的目标标签页ID, 可传入 'current'。")] = "current"
+    ) -> dict:
+        """title: 开启网络监听 (数据分析第1步)
+        description: 对指定标签页开启网络流量监听。在需要捕获API请求（如XHR）来获取数据时，首先调用此工具。
         """
         tab = self._get_tab(tab_id)
-        if not tab: return {"error": f"Tab '{tab_id}' not found."}
+        if not tab:
+            return {"error": f"Tab '{tab_id}' not found."}
+        tab.listen.start(targets='api')
+        return {'success': f"start listening in {tab_id}"}
+
+    def get_captured_requests(
+        self,
+        tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")] = "current"
+    ) -> dict:
+        """title: 获取抓取到的网络请求 (数据分析第2步)
+        description: 一次性获取所有已捕获的API请求信息，包括URL、状态和JSON响应体。
+        """
+        tab = self._get_tab(tab_id)
+        if not tab:
+            return {"error": f"Tab '{tab_id}' not found."}
+
+        packets_info = []
+        # 使用 tab.listen.steps() 遍历所有抓到的包
+        for packet in tab.listen.steps(timeout=2):
+            info = {
+                "url": packet.url,
+                "method": packet.method,
+                "status": packet.response.status,
+                "json": None
+            }
+            # 如果响应是JSON，直接解析并放入结果
+            try:
+                if isinstance(packet.response.body,dict):
+                    info["json"] = packet.response.body
+            except Exception:
+                # 响应体不是有效的JSON，忽略
+                pass
+            packets_info.append(info)
         
-        try:
-            # DrissionPage的CDP方法可能与原始定义略有不同，这里我们直接调用
-            result = tab.run_cdp('Network.getResponseBody', requestId=request_id)
-            return result
-        except Exception as e:
-            return {"error": f"Could not get response body for request ID '{request_id}': {e}"}
+        # 抓取完后自动停止监听，保持干净
+        tab.listen.stop()
+        return {"captured_requests": packets_info}
 
-    def process_json_with_pandas_and_save(self, json_data: str, output_filename: str) -> dict:
-        """
-        【数据分析第4步】使用Pandas处理JSON数据并将其保存为CSV文件。
-        Args:
-            json_data (str): 包含列表的JSON格式字符串。
-            output_filename (str): 要保存的本地文件名，例如 'my_data.csv'。
-        """
-        if not output_filename.endswith('.csv'):
-            return {"error": "Output filename must end with .csv"}
-            
-        try:
-            # 将JSON字符串解析为Python对象
-            data = json.loads(json_data)
-            
-            # 使用 pandas.json_normalize 处理可能嵌套的JSON
-            df = pd.json_normalize(data)
-            
-            # 保存为CSV文件，不包含索引列
-            df.to_csv(output_filename, index=False, encoding='utf-8-sig')
-            
-            return {"status": "success", "file_path": output_filename, "records_saved": len(df)}
-            
-        except Exception as e:
-            return {"error": f"Failed to process data with pandas and save: {e}"}
-
-    def count(self,target: str, text: str) -> int:
-        """
-        统计 {target} 在 {text} 中出现的次数。
+    def count(
+        self,
+        target: Annotated[str, Field(description="要搜索和计数的子字符串。")],
+        text: Annotated[str, Field(description="要在其中进行搜索和计数的文本。")]
+    ) -> int:
+        """title: 统计子字符串出现次数
+        description: 统计一个目标字符串（target）在另一个文本（text）中出现的次数。
         """
         return text.count(target)
 
+    def get_visible_text(
+        self, 
+        tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")] = "current",
+        min_text_length: Annotated[int, Field(description="(可选)行的最小长度，低于此长度的文本行将被过滤掉，默认为 2。")] = 2
+    ) -> dict:
+        """title: 获取页面可见正文
+        description: 提取并返回当前页面上所有可见的、有意义的文本
+        """
+        tab = self._get_tab(tab_id)
+        if not tab:
+            return {"error": f"Tab '{tab_id}' not found."}
 
-#region 初始化mcp
-mcp = FastMCP("DrissionPageMCP-UltimateScanner", log_level="ERROR", instructions=prompt)
-b = DrissionPageMCP()
+        try:
+            # 1. 直接获取 <body> 元素的所有文本内容，DrissionPage 会智能地拼接
+            full_text = tab.ele('tag:body').text
+            if not full_text:
+                return {"visible_text": "Page body contains no text."}
 
+            # 2. 在 Python 端进行清洗和筛选
+            meaningful_lines = []
+            # 按换行符分割成多行
+            lines = full_text.split('\n')
+            
+            for line in lines:
+                # 去除每行首尾的空白
+                cleaned_line = line.strip()
+                
+                # 过滤掉过短的行
+                if len(cleaned_line) >= min_text_length and cleaned_line not in meaningful_lines:
+                    meaningful_lines.append(cleaned_line)
 
+            if not meaningful_lines:
+                return {"visible_text": "No meaningful text found on the page with the current criteria."}
 
+            # 3. 用换行符连接，形成干净的文本块
+            return {"visible_text": "\n".join(meaningful_lines)}
 
-for name, method in inspect.getmembers(b, predicate=inspect.ismethod):
-    if not name.startswith('_'):
-        mcp.add_tool(method)
-
+        except Exception as e:
+            return {"error": f"Failed to get visible text: {e}"}
 def main():
+    # --- MCP Server Initialization ---
+    mcp = FastMCP("DrissionPageMCP", log_level="ERROR", instructions=prompt)
+    b = DrissionPageMCP()
+    # --- 智能注册工具的循环 ---
+    for name, method in inspect.getmembers(b, predicate=inspect.ismethod):
+        if not name.startswith('_'):
+            docstring = inspect.getdoc(method) or ""
+            
+            title = None
+            description = docstring
+            # print(description)
+            lines = docstring.strip().split('\n')
+            title_line = next((line for line in lines if line.lower().strip().startswith("title:")), None)
+            
+            if title_line:
+                title = title_line[len("title:"):].strip()
+                # The rest of the docstring is the description
+                desc_lines = [line for line in lines if line.strip() != title_line.strip()]
+                description = '\n'.join(desc_lines).strip()
+            
+            # Prepare annotations dictionary
+            tool_annotations = {}
+            if title:
+                tool_annotations['title'] = title
+
+            description = description.replace('description: ','')
+            # Call add_tool with the correct parameters
+            mcp.add_tool(
+                fn=method, 
+                name=name, 
+                description=description, 
+            )
     print("DrissionPage MCP server (Ultimate Scanner) is running...")
     mcp.run(transport='stdio')
 
