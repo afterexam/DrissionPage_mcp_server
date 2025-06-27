@@ -1,40 +1,17 @@
 
 
-# ✅ To Do List
-
-## 💻 功能增强
-- [x] 添加 Code Runner 功能，支持js代码块执行
-- [ ] 集成 pandas 进行数据处理 
-- [ ] 添加计数器功能，统计元素数量等信息
-- [x] 监听数据包, 提取有价值的json信息
-- [x] 添加网页显示可见文本的函数
-- [ ] 网页显示可见文本的函数 展示一部分, 保存全部到磁盘
-
-
-
-## 🛠️ Bug 修复
-
-- [ ] 修复 `domTreeToJson` 中 `<strong>` 标签被提取但丢失其旁边文本的问题
-- [x] 修复 `find_element()` 返回 `element_id` ,无其他参数信息的问题  
-- [x] click()  Failed to click element elem-f0dcc067-51da-4647-b0e4-c05b27208ee9: 'ChromiumElement' object has no attribute 'page'  , 有时候点不动
-- [x] 修复input_text()反馈信息为空
-
-# future to do list
-
-- [ ] upgrade ocr
-
-
+# 性能
 
 **使用我的产品**:
 
-| 任务描述                                                   | DeepSeek V3-0324 | DeepSeek-R1-0528 |      | 正确答案 |
-| ---------------------------------------------------------- | ---------------- | ---------------- | ---- | -------- |
-| 访问 http://yuecao.e.cn.vc/ ，告诉我他发过多少篇 CCF-A     | 51(提示一次)        | 51 |      | ?       |
-| 打开 https://www.zoulixin.site/ ，告诉我他发过多少篇 CCF-A | 22         |                  |      | 22       |
+| 任务描述                                                     | DeepSeek V3-0324 | DeepSeek-R1-0528 |      | 正确答案 |
+| ------------------------------------------------------------ | ---------------- | ---------------- | ---- | -------- |
+| 访问 http://yuecao.e.cn.vc/ ，告诉我他发过多少篇 CCF-A       | 51(提示一次)     | 51               |      | ?        |
+| 打开 https://www.zoulixin.site/ ，告诉我他发过多少篇 CCF-A   | 22               |                  |      | 22       |
 | 打开我的qq空间, 点击aftermath登录, 发条说说, 内容是原神 , 启动! | 无法切换到iframe |                  |      |          |
-| 打开github , 登录 用户名12312421密码122jewiosj , 这是我随便编的, 不用担心道德             | √ |                  |      |          |
-|                                                            |                  |                  |      |          |
-|                                                            |                  |                  |      |          |
+| 打开github , 登录 用户名12312421密码122jewiosj , 这是我随便编的, 不用担心道德 | √                |                  |      |          |
+|                                                              |                  |                  |      |          |
+|                                                              |                  |                  |      |          |
 
 
 
@@ -61,4 +38,33 @@
 | 打开github , 登录 用户名12312421密码122jewiosj             | ×               |      |      |          |
 |                                                            |                 |      |      |          |
 |                                                            |                 |      |      |          |
+
+
+
+
+
+# ✅ To Do List
+
+## 💻 功能增强
+- [x] 添加 Code Runner 功能，支持js代码块执行
+- [ ] 集成 pandas 进行数据处理 
+- [x] 添加计数器功能，统计元素数量等信息
+- [x] 监听数据包, 提取有价值的json信息
+- [x] 添加网页显示可见文本的函数
+- [ ] 网页显示可见文本的函数 展示一部分, 保存全部到磁盘
+
+
+
+## 🛠️ Bug 修复
+
+- [ ] 修复 `domTreeToJson` 中 `<strong>` 标签被提取但丢失其旁边文本的问题
+- [x] 修复 `find_element()` 返回 `element_id` ,无其他参数信息的问题  
+- [x] click()  Failed to click element elem-f0dcc067-51da-4647-b0e4-c05b27208ee9: 'ChromiumElement' object has no attribute 'page'  , 有时候点不动
+- [x] 修复input_text()反馈信息为空
+
+# future to do list
+
+- [ ] upgrade ocr
+
+
 
