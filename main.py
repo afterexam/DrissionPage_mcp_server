@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+import sys,os
+# 将脚本所在的目录添加到 Python 的模块搜索路径中
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import json
 import pandas as pd
 import inspect
@@ -26,9 +29,9 @@ prompt = '''
 1.  **启动浏览器**: 使用 `connect_or_open_browser` 启动或连接已有的浏览器实例。这是所有操作的前提。
 2.  **导航**: 使用 `new_tab` 打开新的标签页或导航到目标网址。
 3.  **分析页面**: 获取当前页面的信息，用于分析页面结构，识别目标元素的定位信息。
-4.  **定位元素**: 根据 DOM 分析得到的线索（如文本内容、CSS 选择器等），使用 `find_element` 或 `find_elements` 查找页面中的元素，并缓存其引用。
-5.  **执行操作**: 对查找到的元素执行具体操作，如 `click`、`input_text`、`get_attribute` 等。
-6.  **数据抓取 (可选)**: 如果需要抓取接口数据, 依次使用 `start_network_listening`, `get_network_traffic_summary`, `get_response_body`, 和 `process_json_with_pandas_and_save`。
+4.  **定位元素**: 根据页面真实内容, 找到定位的线索
+5.  **执行操作**: 对查找到的元素执行具体操作
+6.  **数据抓取 (可选)**: 如果需要抓取接口数据, 依次使用 `start_network_listening`, `get_network_traffic_summary`
 '''
 
 class DrissionPageMCP:
@@ -115,7 +118,7 @@ class DrissionPageMCP:
 
     def list_tabs(self) -> List[Dict[str, Any]]:
         """title: 列出所有标签页
-        description: 获取所有已打开标签页的id，并标明哪个是当前活动标签页。
+        description: 获取所有已打开标签页的id,当你遗忘tab_id的时候使用
         """
         if not self.browser:
             return []
@@ -269,29 +272,74 @@ class DrissionPageMCP:
         self, 
         element_id: Annotated[str, Field(description="目标元素的唯一ID，通过 find_element 或 find_elements 获取。")]
     ) -> dict:
-        """title: 点击元素
-        description: 点击一个已通过 find_element 获取到的元素。
+        """title: 点击元素 (带反馈)
+        description: 点击一个已获取的元素，并返回点击后的页面状态变化（如是否发生跳转）。
         """
         element = self.element_cache.get(element_id)
         if not element:
             return {"error": f"Element ID '{element_id}' not found in cache."}
-        element.click()
-        return {"status": "success", "action": "click"}
+        
+        try:
+            # 1. 获取点击前的页面URL和标签页数量
+            tab = self._get_tab('current')
+            url_before = tab.url
+            tabs_before = len(self.list_tabs())
+            
+            # 2. 执行点击操作
+            element.click(by_js=None)
+            
+            # 3. 等待一小段时间，给页面跳转或发生变化留出时间
+            time.sleep(0.5) # 这个时间可以根据网络情况微调
+            
+            # 4. 获取点击后的状态
+            url_after = tab.url
+            tabs_after = len(self.list_tabs())
+            
+            # 5. 组装反馈信息
+            feedback = {
+                "url_changed": url_before != url_after,
+                "new_tab_opened": tabs_after > tabs_before,
+                "url_before": url_before,
+                "url_after": url_after,
+            }
+            
+            return {"status": "success", "action": "click", "feedback": feedback}
+
+        except Exception as e:
+            return {"error": f"Failed to click element {element_id}: {e}"}
 
     def input_text(
         self, 
         element_id: Annotated[str, Field(description="目标元素的唯一ID，通过 find_element 或 find_elements 获取。")], 
         text: Annotated[str, Field(description="要输入的文本内容。")], 
-        clear_first: Annotated[bool, Field(description="输入前是否先清空输入框，默认为 True。")] = True
+        clear_first: Annotated[bool, Field(description="(可选)输入前是否先清空输入框，默认为 True。")] = True
     ) -> dict:
         """title: 输入文本
-        description: 向一个已获取的元素（通常是输入框）输入文本。
+        description: 向一个已获取的元素（通常是输入框）输入文本，并验证输入是否成功。
         """
         element = self.element_cache.get(element_id)
         if not element:
             return {"error": f"Element ID '{element_id}' not found in cache."}
-        element.input(text, clear=clear_first)
-        return {"status": "success", "action": "input_text"}
+            
+        try:
+            # 1. 执行输入操作
+            element.input(text, clear=clear_first)
+            
+            # --- [核心改动] ---
+            # 2. 获取输入后元素的 `value` 属性进行验证
+            #    对于输入框，内容通常存在于 .value 属性中
+            current_value = element.value
+            
+            # 3. 组装反馈信息
+            feedback = {
+                "verified": current_value == text,
+                "actual_text_in_box": current_value
+            }
+            
+            return {"status": "success", "action": "input_text", "feedback": feedback}
+            
+        except Exception as e:
+             return {"error": f"Failed to input text into element {element_id}: {e}"}
 
     def get_attribute(
         self, 

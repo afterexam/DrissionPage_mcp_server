@@ -46,5 +46,6 @@ async def run_network_capture_test():
         if req['json'] is None:
             continue
         print(req['json'])
+        
 if __name__ == "__main__":
     asyncio.run(run_network_capture_test())
