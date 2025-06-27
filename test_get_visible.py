@@ -2,7 +2,7 @@ import asyncio
 from main import DrissionPageMCP  # 从你的主文件导入我们写好的类
 
 # 一个公开的、包含大量文章和导航栏的新闻页面，非常适合测试
-TEST_URL = "http://yuecao.e.cn.vc/ "
+TEST_URL = "https://user.qzone.qq.com/1430097658?_t_=0.7563411551280744"
 
 async def run_visible_text_test():
     """

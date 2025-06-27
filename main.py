@@ -20,7 +20,7 @@ from PIL import Image as PILImage
 import base64
 import io
 import time
-
+import os
 prompt = '''
 你正在使用一组浏览器控制工具来执行网页自动化任务。请按照以下步骤依次使用这些工具,完全自主完成任务：
 1.  **启动浏览器**: 使用 `connect_or_open_browser` 启动或连接已有的浏览器实例。这是所有操作的前提。
@@ -115,7 +115,7 @@ class DrissionPageMCP:
 
     def list_tabs(self) -> List[Dict[str, Any]]:
         """title: 列出所有标签页
-        description: 获取所有已打开标签页的列表，并标明哪个是当前活动标签页。
+        description: 获取所有已打开标签页的id，并标明哪个是当前活动标签页。
         """
         if not self.browser:
             return []
@@ -261,7 +261,7 @@ class DrissionPageMCP:
 
     def read_element_cache(self) -> Dict[str, str]:
         """title: 读取元素缓存
-        description: 查看所有当前已缓存的元素及其ID。
+        description: 查看所有当前已找到过的元素ID和具体信息
         """
         return {eid: str(ele) for eid, ele in self.element_cache.items()}
 
@@ -384,52 +384,71 @@ class DrissionPageMCP:
     def count(
         self,
         target: Annotated[str, Field(description="要搜索和计数的子字符串。")],
-        text: Annotated[str, Field(description="要在其中进行搜索和计数的文本。")]
+        path: Annotated[str, Field(description="待搜索的长文本在硬盘的存储位置")]
     ) -> int:
         """title: 统计子字符串出现次数
-        description: 统计一个目标字符串（target）在另一个文本（text）中出现的次数。
+        description: 统计一个目标字符串（target）在另一个文本文件中出现的次数。
         """
+        with open(path, 'r', encoding='utf-8') as f:
+            text = f.read()
         return text.count(target)
+
 
     def get_visible_text(
         self, 
         tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")] = "current",
-        min_text_length: Annotated[int, Field(description="(可选)行的最小长度，低于此长度的文本行将被过滤掉，默认为 2。")] = 2
+        min_text_length: Annotated[int, Field(description="(可选)文本块的最小长度，低于此长度的文本将被过滤掉，默认为 2。")] = 2,
     ) -> dict:
-        """title: 获取页面可见正文
-        description: 提取并返回当前页面上所有可见的、有意义的文本
+        """title: 获取页面可见正文并保存
+        description: 提取、返回并保存当前页面上所有可见的、有意义的文本。会自动过滤掉导航、按钮等无意义的短文本。
         """
+        output_dir = "Web_info"
         tab = self._get_tab(tab_id)
         if not tab:
             return {"error": f"Tab '{tab_id}' not found."}
 
         try:
-            # 1. 直接获取 <body> 元素的所有文本内容，DrissionPage 会智能地拼接
+            # 1. 直接获取 <body> 元素的所有文本内容
             full_text = tab.ele('tag:body').text
             if not full_text:
                 return {"visible_text": "Page body contains no text."}
 
             # 2. 在 Python 端进行清洗和筛选
             meaningful_lines = []
-            # 按换行符分割成多行
             lines = full_text.split('\n')
             
             for line in lines:
-                # 去除每行首尾的空白
                 cleaned_line = line.strip()
-                
-                # 过滤掉过短的行
-                if len(cleaned_line) >= min_text_length and cleaned_line not in meaningful_lines:
+                if len(cleaned_line) >= min_text_length:
                     meaningful_lines.append(cleaned_line)
 
             if not meaningful_lines:
                 return {"visible_text": "No meaningful text found on the page with the current criteria."}
 
-            # 3. 用换行符连接，形成干净的文本块
-            return {"visible_text": "\n".join(meaningful_lines)}
+            final_text = "\n\n".join(meaningful_lines)
+
+            # --- [核心改动] ---
+            # 3. 创建目录并保存文件
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+
+            # 根据页面标题生成一个安全的文件名
+            page_title = tab.title or "untitled"
+            safe_filename = "".join(c for c in page_title if c.isalnum() or c in (' ', '_')).rstrip()
+            file_path = os.path.join(output_dir, f"{safe_filename[:50]}.txt") # 限制文件名长度
+
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(final_text)
+
+            # 4. 在返回值中同时包含文本内容和文件路径
+            return {
+                "visible_text": final_text,
+                "file_path": os.path.abspath(file_path) # 返回文件的绝对路径
+            }
 
         except Exception as e:
-            return {"error": f"Failed to get visible text: {e}"}
+            return {"error": f"Failed to get and save visible text: {e}"}
+
 def main():
     # --- MCP Server Initialization ---
     mcp = FastMCP("DrissionPageMCP", log_level="ERROR", instructions=prompt)
