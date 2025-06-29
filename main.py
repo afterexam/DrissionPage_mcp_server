@@ -33,6 +33,7 @@ prompt = '''
 5.  **执行操作**: 对查找到的元素执行具体操作
 6.  **数据抓取 (可选)**: 如果需要抓取接口数据, 依次使用 `start_network_listening`, `get_network_traffic_summary`
 '''
+from DataPacketSummarizer import DataPacketSummarizer
 
 class DrissionPageMCP:
     """
@@ -45,6 +46,7 @@ class DrissionPageMCP:
         self.browser: Optional[Chromium] = None
         self.element_cache: Dict[str, ChromiumElement] = {}
         self.network_events: List[Dict] = []
+        self.summarizer = DataPacketSummarizer()
 
     def _get_tab(self, tab_id: str) -> Optional[ChromiumTab]:
         """内部辅助函数，根据 tab_id 获取标签页对象，支持 'current' 别名。"""
@@ -190,7 +192,7 @@ class DrissionPageMCP:
     def find_element(
         self, 
         tab_id: Annotated[str, Field(description="目标标签页的ID, 可传入 'current'。")], 
-        by: Annotated[Literal['css', 'text'], Field(description="定位策略, 'css' (CSS选择器) 或 'text' (模糊文本匹配)。")], 
+        by: Annotated[Literal['css', 'text', 'accurate'], Field(description="定位策略, 'css' (CSS选择器) 或 'text' (模糊文本匹配)或'accurate'(精确文本匹配)。")], 
         value: Annotated[str, Field(description="定位策略对应的值。")]
     ) -> dict:
         """title: 查找单个元素
@@ -199,7 +201,12 @@ class DrissionPageMCP:
         tab = self._get_tab(tab_id)
         if not tab:
             return {"error": f"Tab with id '{tab_id}' not found."}
-        locator = f'text:{value}' if by == 'text' else f'css:{value}'
+        # 如果是精确文本匹配，使用 'accurate' 定位
+        if by == 'accurate':
+            locator = f'text={value}'
+        else:
+            locator = f'{by}:{value}'
+
         element = tab.ele(locator, timeout=5)
         if element:
             element_id = f"elem-{uuid.uuid4()}"
@@ -406,28 +413,14 @@ class DrissionPageMCP:
         tab = self._get_tab(tab_id)
         if not tab:
             return {"error": f"Tab '{tab_id}' not found."}
-
         packets_info = []
         # 使用 tab.listen.steps() 遍历所有抓到的包
         for packet in tab.listen.steps(timeout=2):
-            info = {
-                "url": packet.url,
-                "method": packet.method,
-                "status": packet.response.status,
-                "json": None
-            }
-            # 如果响应是JSON，直接解析并放入结果
-            try:
-                if isinstance(packet.response.body,dict):
-                    info["json"] = packet.response.body
-            except Exception:
-                # 响应体不是有效的JSON，忽略
-                pass
-            packets_info.append(info)
-        
+            packets_info.append(packet)
+        summarized_info = self.summarizer.summarize_packets(packets_info)
         # 抓取完后自动停止监听，保持干净
         tab.listen.stop()
-        return {"captured_requests": packets_info}
+        return {"captured_requests": summarized_info}
 
     def count(
         self,
